@@ -1,8 +1,22 @@
 import { Router } from 'express';
 import { db, now } from '../db.js';
-import { generatePairingCode, hashPassword, pairingExpiresAt, requireCaregiver, signCaregiverToken, verifyPassword } from '../auth.js';
-import { broadcast } from '../broadcast.js';
 import {
+  forgetFailures,
+  generatePairingCode,
+  hashPassword,
+  LOGIN_MAX_FAILURES,
+  pairingExpiresAt,
+  recordFailure,
+  requireCaregiver,
+  revokeCaregiverSessions,
+  signCaregiverToken,
+  tooManyFailures,
+  verifyPassword,
+} from '../auth.js';
+import { broadcast } from '../broadcast.js';
+import { listContacts, replaceContacts } from '../contacts.js';
+import {
+  contactsBodySchema,
   createDeviceBodySchema,
   fcmTokenBodySchema,
   loginBodySchema,
@@ -41,13 +55,35 @@ caregiverRoutes.post('/auth/login', validateBody(loginBodySchema), (req, res) =>
     | { id: number; password_hash: string; name: string }
     | undefined;
 
+  // Travão antes do bcrypt: verificar a password é caro de propósito, e é
+  // esse custo que um atacante usaria para derrubar o Pi.
+  const key = `login:${email}`;
+  if (row && tooManyFailures(key, LOGIN_MAX_FAILURES)) {
+    res.status(429).json({ error: 'demasiadas tentativas falhadas; tente daqui a 15 minutos' });
+    return;
+  }
+
   // Mensagem igual para email desconhecido ou password errada — não dizer
   // qual das duas falhou evita confirmar a um atacante que o email existe.
   if (!row || !verifyPassword(password, row.password_hash)) {
+    if (row) recordFailure(key); // só contas que existem — ver `recordFailure`
     res.status(401).json({ error: 'credenciais inválidas' });
     return;
   }
+
+  forgetFailures(key);
   res.json({ token: signCaregiverToken(row.id), name: row.name });
+});
+
+/**
+ * "Terminar todas as sessões" — a única forma de cortar um JWT antes dos 30
+ * dias (ROADMAP §2.6). Para quando um telemóvel com o painel aberto se perde.
+ * Derruba também a sessão de onde veio o pedido, de propósito: quem faz isto
+ * quer que mais ninguém fique lá dentro.
+ */
+caregiverRoutes.post('/auth/revoke-sessions', requireCaregiver, (req, res) => {
+  revokeCaregiverSessions(req.caregiver!.id);
+  res.json({ ok: true });
 });
 
 caregiverRoutes.put('/me/fcm-token', requireCaregiver, validateBody(fcmTokenBodySchema), (req, res) => {
@@ -83,7 +119,7 @@ caregiverRoutes.get('/devices', requireCaregiver, (_req, res) => {
   const rows = db
     .prepare(
       `SELECT
-         d.id, d.name, d.battery_pct, d.last_seen_at, d.created_at,
+         d.id, d.name, d.battery_pct, d.last_seen_at, d.app_version, d.created_at,
          d.pairing_code,
          (d.token_hash IS NOT NULL) AS paired,
          (SELECT lat FROM locations l WHERE l.device_id = d.id ORDER BY l.recorded_at DESC LIMIT 1) AS last_lat,
@@ -125,10 +161,32 @@ caregiverRoutes.get('/devices/:id/contacts', requireCaregiver, (req, res) => {
     return;
   }
 
-  const rows = db
-    .prepare(`SELECT id, name, phone, priority FROM emergency_contacts WHERE device_id = ? ORDER BY priority`)
-    .all(deviceId);
-  res.json({ contacts: rows });
+  res.json({ contacts: listContacts(deviceId) });
+});
+
+/**
+ * Quem manda nos contactos é o cuidador (ROADMAP §2.3). O telemóvel do idoso
+ * apanha a lista nova na próxima leitura — até 15 minutos depois, no ritmo do
+ * heartbeat. Não vale a pena empurrar por WebSocket: a app do idoso não tem
+ * ligação de cuidador, e um contacto errado durante 15 min não é a diferença
+ * entre socorro e silêncio.
+ */
+caregiverRoutes.put('/devices/:id/contacts', requireCaregiver, validateBody(contactsBodySchema), (req, res) => {
+  const deviceId = Number(req.params.id);
+  if (!Number.isInteger(deviceId)) {
+    res.status(400).json({ error: 'id de dispositivo inválido' });
+    return;
+  }
+
+  // Sem isto, um id errado gravava contactos órfãos que ninguém voltava a ver.
+  const exists = db.prepare(`SELECT 1 FROM devices WHERE id = ?`).get(deviceId);
+  if (!exists) {
+    res.status(404).json({ error: 'dispositivo não encontrado' });
+    return;
+  }
+
+  replaceContacts(deviceId, req.body as { name: string; phone: string; priority: number }[]);
+  res.json({ contacts: listContacts(deviceId) });
 });
 
 // --- alertas ---------------------------------------------------------------------

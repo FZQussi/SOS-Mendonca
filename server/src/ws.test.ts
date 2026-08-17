@@ -10,7 +10,7 @@ process.env.JWT_SECRET ??= 'segredo-de-teste-não-usar-em-produção';
 const { createApp } = await import('./index.js');
 const { attachWebSocket } = await import('./ws.js');
 const { db, now } = await import('./db.js');
-const { hashPassword, signCaregiverToken } = await import('./auth.js');
+const { hashPassword, revokeCaregiverSessions, signCaregiverToken } = await import('./auth.js');
 const { createAlert } = await import('./alerts.js');
 
 const app = createApp();
@@ -70,6 +70,21 @@ test('ligação com token de cuidador válido recebe hello', async () => {
   } finally {
     ws.close();
   }
+});
+
+test('token revogado não abre WebSocket — revogar tem de fechar as duas portas', async () => {
+  const token = seedCaregiverToken('ws3@exemplo.pt');
+  const { id } = db.prepare(`SELECT id FROM caregivers WHERE email = ?`).get('ws3@exemplo.pt') as { id: number };
+  revokeCaregiverSessions(id);
+
+  const ws = new WebSocket(`${wsBase}?token=${token}`);
+  const outcome = await new Promise<string>((resolve) => {
+    ws.on('unexpected-response', (_req, res) => resolve(`status:${res.statusCode}`));
+    ws.on('open', () => resolve('abriu — não devia'));
+  });
+  // Sem `ws.close()`: a ligação nunca chegou a abrir, e fechá-la agora só
+  // gera actividade assíncrona depois do fim do teste (como no teste do 401).
+  assert.equal(outcome, 'status:401');
 });
 
 test('um alerta novo criado no servidor chega ao cliente ligado', async () => {

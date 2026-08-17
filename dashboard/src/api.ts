@@ -1,4 +1,4 @@
-import type { Alert, Device, LocationPoint } from './types';
+import type { Alert, Contact, Device, LocationPoint } from './types';
 
 const TOKEN_KEY = 'sos-mendonca-token';
 const NAME_KEY = 'sos-mendonca-name';
@@ -64,6 +64,9 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
 
+  /** Invalida todos os JWT desta conta — incluindo o desta janela. */
+  revokeSessions: () => request<{ ok: true }>('/auth/revoke-sessions', { method: 'POST' }),
+
   devices: () => request<{ devices: Device[] }>('/devices'),
 
   createDevice: (name: string) =>
@@ -71,6 +74,14 @@ export const api = {
 
   locations: (deviceId: number, hours = 24) =>
     request<{ locations: LocationPoint[] }>(`/devices/${deviceId}/locations?hours=${hours}`),
+
+  contacts: (deviceId: number) => request<{ contacts: Contact[] }>(`/devices/${deviceId}/contacts`),
+
+  saveContacts: (deviceId: number, contacts: { name: string; phone: string; priority: number }[]) =>
+    request<{ contacts: Contact[] }>(`/devices/${deviceId}/contacts`, {
+      method: 'PUT',
+      body: JSON.stringify(contacts),
+    }),
 
   alerts: (open: boolean) => request<{ alerts: Alert[] }>(`/alerts${open ? '?open=true' : ''}`),
 

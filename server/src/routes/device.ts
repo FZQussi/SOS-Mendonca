@@ -1,7 +1,16 @@
-import { Router } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import { db, now, type AlertType } from '../db.js';
-import { generateDeviceToken, hashToken, requireDevice } from '../auth.js';
+import {
+  forgetFailures,
+  generateDeviceToken,
+  hashToken,
+  PAIR_MAX_FAILURES,
+  recordFailure,
+  requireDevice,
+  tooManyFailures,
+} from '../auth.js';
 import { createAlert } from '../alerts.js';
+import { listContacts, replaceContacts } from '../contacts.js';
 import { broadcast } from '../broadcast.js';
 import {
   alertBodySchema,
@@ -18,7 +27,41 @@ import {
  */
 export const deviceRoutes = Router();
 
+/** Aceita `1.2.3`, `1.2.3-beta.1` e pouco mais. O resto ignora-se. */
+const APP_VERSION_RE = /^[\w.+-]{1,30}$/;
+
+/**
+ * Guarda a versão da app que fez o pedido (`X-SOS-App-Version`, Context.md
+ * §9). Sem isto, uma OTA que parta o seguimento num telemóvel e não noutro é
+ * impossível de diagnosticar à distância.
+ *
+ * Corre a seguir ao `requireDevice`, que é quem põe `req.device`. Um cabeçalho
+ * em falta ou estranho não é erro: a app antiga fica semanas no telemóvel e
+ * não pode deixar de funcionar por causa disto (compatibilidade só para a
+ * frente). Só escreve quando muda — são pedidos a toda a hora e o cartão SD
+ * do Pi agradece.
+ */
+export function recordAppVersion(req: Request, _res: Response, next: NextFunction): void {
+  const version = req.headers['x-sos-app-version'];
+  if (typeof version === 'string' && APP_VERSION_RE.test(version) && req.device) {
+    db.prepare(
+      `UPDATE devices SET app_version = ?
+       WHERE id = ? AND (app_version IS NULL OR app_version != ?)`,
+    ).run(version, req.device.id, version);
+  }
+  next();
+}
+
 deviceRoutes.post('/pair', validateBody(pairSchema), (req, res) => {
+  // Chave global, não por código: quem ataca varia o código a cada tentativa,
+  // por isso contá-los em separado não travava nada. Emparelhar é um gesto
+  // raro — uma pessoa a escrever um código não chega perto de 20 falhas.
+  const PAIR_KEY = 'pair';
+  if (tooManyFailures(PAIR_KEY, PAIR_MAX_FAILURES)) {
+    res.status(429).json({ error: 'Demasiadas tentativas. Espere um pouco e tente outra vez.' });
+    return;
+  }
+
   const { code } = req.body as { code: string };
   const token = generateDeviceToken();
   const tokenHash = hashToken(token);
@@ -38,14 +81,17 @@ deviceRoutes.post('/pair', validateBody(pairSchema), (req, res) => {
   })();
 
   if (!paired) {
+    recordFailure(PAIR_KEY);
     res.status(401).json({ error: 'código inválido ou expirado' });
     return;
   }
+
+  forgetFailures(PAIR_KEY);
   // O token em claro existe só aqui — nunca mais é recuperável (Context.md §7).
   res.json({ token, device: paired });
 });
 
-deviceRoutes.post('/locations', requireDevice, validateBody(locationsBodySchema), (req, res) => {
+deviceRoutes.post('/locations', requireDevice, recordAppVersion, validateBody(locationsBodySchema), (req, res) => {
   const device = req.device!;
   const points = Array.isArray(req.body) ? req.body : [req.body];
   const receivedAt = now();
@@ -74,7 +120,7 @@ deviceRoutes.post('/locations', requireDevice, validateBody(locationsBodySchema)
   res.json({ saved: points.length });
 });
 
-deviceRoutes.post('/alerts', requireDevice, validateBody(alertBodySchema), (req, res) => {
+deviceRoutes.post('/alerts', requireDevice, recordAppVersion, validateBody(alertBodySchema), (req, res) => {
   const device = req.device!;
   const body = req.body as { type: AlertType; lat?: number; lon?: number; note?: string; recorded_at?: number };
 
@@ -97,25 +143,30 @@ deviceRoutes.post('/alerts', requireDevice, validateBody(alertBodySchema), (req,
   res.json({ id: alert.id });
 });
 
-deviceRoutes.post('/heartbeat', requireDevice, validateBody(heartbeatBodySchema), (req, res) => {
+deviceRoutes.post('/heartbeat', requireDevice, recordAppVersion, validateBody(heartbeatBodySchema), (req, res) => {
   const device = req.device!;
   const { battery_pct } = req.body as { battery_pct: number };
   db.prepare(`UPDATE devices SET battery_pct = ?, last_seen_at = ? WHERE id = ?`).run(battery_pct, now(), device.id);
   res.json({ ok: true });
 });
 
-deviceRoutes.put('/contacts', requireDevice, validateBody(contactsBodySchema), (req, res) => {
+/**
+ * O servidor é a origem da verdade dos contactos, não o telemóvel: quem os
+ * edita é o cuidador, no painel (ROADMAP §1.1 — a app vê, não edita). A app
+ * lê isto de tempo a tempo e guarda uma cópia local, porque no momento do SOS
+ * não pode depender de haver rede (princípio 2).
+ */
+deviceRoutes.get('/contacts', requireDevice, recordAppVersion, (req, res) => {
+  res.json({ contacts: listContacts(req.device!.id) });
+});
+
+/**
+ * Continua a existir só para o onboarding: a app escreve aqui o primeiro
+ * contacto, antes de o cuidador ter aberto o painel. A partir daí o sentido é
+ * o contrário — o `GET` acima.
+ */
+deviceRoutes.put('/contacts', requireDevice, recordAppVersion, validateBody(contactsBodySchema), (req, res) => {
   const device = req.device!;
-  const contacts = req.body as { name: string; phone: string; priority: number }[];
-
-  const replace = db.transaction((rows: typeof contacts) => {
-    db.prepare(`DELETE FROM emergency_contacts WHERE device_id = ?`).run(device.id);
-    const insert = db.prepare(
-      `INSERT INTO emergency_contacts (device_id, name, phone, priority) VALUES (?,?,?,?)`,
-    );
-    for (const c of rows) insert.run(device.id, c.name, c.phone, c.priority);
-  });
-  replace(contacts);
-
-  res.json({ contacts });
+  replaceContacts(device.id, req.body as { name: string; phone: string; priority: number }[]);
+  res.json({ contacts: listContacts(device.id) });
 });

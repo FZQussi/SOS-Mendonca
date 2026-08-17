@@ -11,6 +11,7 @@ process.env.JWT_SECRET ??= 'segredo-de-teste-não-usar-em-produção';
 const { createApp } = await import('../index.js');
 const { db, now } = await import('../db.js');
 const { events } = await import('../broadcast.js');
+const { PAIR_MAX_FAILURES, resetFailures } = await import('../auth.js');
 
 const app = createApp();
 const server: Server = createServer(app);
@@ -52,6 +53,34 @@ test('pair: código inexistente → 401', async () => {
   });
   assert.equal(status, 401);
   assert.ok((body as { error: string }).error);
+});
+
+test('pair: força bruta bate no 429, e um código certo volta a ser aceite depois', async (t) => {
+  // Os contadores são globais ao processo — limpar antes e depois para não
+  // envenenar os outros testes de emparelhamento.
+  resetFailures();
+  t.after(() => resetFailures());
+
+  for (let i = 0; i < PAIR_MAX_FAILURES; i++) {
+    const { status } = await json('/api/v1/device/pair', {
+      method: 'POST',
+      body: JSON.stringify({ code: '000001' }),
+    });
+    assert.equal(status, 401, `tentativa ${i + 1} devia ainda passar pelo travão`);
+  }
+
+  const blocked = await json('/api/v1/device/pair', { method: 'POST', body: JSON.stringify({ code: '000001' }) });
+  assert.equal(blocked.status, 429);
+
+  // Um código válido também é recusado enquanto o travão está ativo: é o
+  // preço de não conseguir distinguir quem ataca de quem tenta emparelhar.
+  const code = seedDevice();
+  const duranteOTravao = await json('/api/v1/device/pair', { method: 'POST', body: JSON.stringify({ code }) });
+  assert.equal(duranteOTravao.status, 429);
+
+  resetFailures();
+  const depois = await json('/api/v1/device/pair', { method: 'POST', body: JSON.stringify({ code }) });
+  assert.equal(depois.status, 200);
 });
 
 test('pair: código com formato errado → 400 (Zod)', async () => {
@@ -209,4 +238,57 @@ test('contacts: PUT substitui a lista completa', async () => {
     .prepare(`SELECT COUNT(*) AS n FROM emergency_contacts WHERE device_id = ?`)
     .get(device.id) as { n: number };
   assert.equal(n, 2);
+});
+
+test('contacts: GET devolve por prioridade — o primeiro é quem o SOS liga', async () => {
+  const { token, device } = await pairedDevice();
+  // Inseridos fora de ordem de propósito: quem manda é a prioridade, não o INSERT.
+  const insert = db.prepare(
+    `INSERT INTO emergency_contacts (device_id, name, phone, priority) VALUES (?,?,?,?)`,
+  );
+  insert.run(device.id, 'Vizinha', '920000000', 2);
+  insert.run(device.id, 'Filha', '910000000', 1);
+
+  const { status, body } = await json('/api/v1/device/contacts', { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(status, 200);
+  const { contacts } = body as { contacts: { name: string; priority: number }[] };
+  assert.deepEqual(
+    contacts.map((c) => c.name),
+    ['Filha', 'Vizinha'],
+  );
+});
+
+test('versão da app: guarda o cabeçalho, ignora lixo, e sem ele continua a servir', async () => {
+  const { token, device } = await pairedDevice();
+  const version = () =>
+    (db.prepare(`SELECT app_version FROM devices WHERE id = ?`).get(device.id) as { app_version: string | null })
+      .app_version;
+
+  const beat = (headers: Record<string, string>) =>
+    json('/api/v1/device/heartbeat', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, ...headers },
+      body: JSON.stringify({ battery_pct: 80 }),
+    });
+
+  await beat({ 'X-SOS-App-Version': '1.4.2' });
+  assert.equal(version(), '1.4.2');
+
+  // Lixo do cliente não entra na BD nem apaga o que já se sabia.
+  await beat({ 'X-SOS-App-Version': '1.0 <script>' });
+  assert.equal(version(), '1.4.2');
+
+  // App antiga, que ainda não envia o cabeçalho: o pedido tem de funcionar na
+  // mesma (compatibilidade só para a frente, Context.md §9).
+  const semCabecalho = await beat({});
+  assert.equal(semCabecalho.status, 200);
+  assert.equal(version(), '1.4.2');
+
+  await beat({ 'X-SOS-App-Version': '1.5.0' });
+  assert.equal(version(), '1.5.0');
+});
+
+test('contacts: GET sem token → 401, não a lista de outro dispositivo', async () => {
+  const { status } = await json('/api/v1/device/contacts');
+  assert.equal(status, 401);
 });

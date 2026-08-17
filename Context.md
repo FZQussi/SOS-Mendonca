@@ -194,6 +194,12 @@ Confundir isto é o erro mais fácil de cometer neste código.
 | Middleware | `requireDevice` | `requireCaregiver` |
 | Rotas | `/api/v1/device/*` | `/api/v1/*` |
 
+O JWT do cuidador leva a `token_version` da conta. Subir essa coluna (é o que
+o `POST /auth/revoke-sessions` faz) invalida de imediato todos os tokens já
+assinados — a única forma de cortar uma sessão antes dos 30 dias. Como
+`verifyCaregiverToken` é partilhado, isso fecha o HTTP e o WebSocket ao mesmo
+tempo.
+
 **O telemóvel nunca faz login.** Se te vires a escrever um ecrã de palavra-passe
 na app do idoso, algo correu mal no desenho.
 
@@ -205,21 +211,35 @@ POST /api/v1/device/pair          { code }              → { token, device }
 POST /api/v1/device/locations     ponto ou array        → { saved }
 POST /api/v1/device/alerts        { type, lat, lon }    → { id }
 POST /api/v1/device/heartbeat     { battery_pct }       → { ok }
-PUT  /api/v1/device/contacts      [{ name, phone, priority }]
+GET  /api/v1/device/contacts      → { contacts }        (por prioridade)
+PUT  /api/v1/device/contacts      [{ name, phone, priority }]   só no onboarding
 ```
+
+Os contactos pertencem ao servidor, não ao telemóvel: quem os edita é o
+cuidador, no painel. A app lê-os a cada heartbeat e guarda uma cópia local —
+no momento do SOS não pode haver um `await` antes da chamada (princípio 2). O
+`PUT` do dispositivo sobrevive só para o onboarding, onde ainda não há
+ninguém a olhar para o painel.
 
 **Cuidador:**
 ```
 POST /api/v1/auth/register        (fecha após o primeiro utilizador)
 POST /api/v1/auth/login           → { token, name }
+POST /api/v1/auth/revoke-sessions → { ok }  (derruba todos os JWT da conta)
 POST /api/v1/devices              { name } → { pairing_code }
 GET  /api/v1/devices              lista + última posição
 GET  /api/v1/devices/:id/locations?hours=24
 GET  /api/v1/devices/:id/contacts
+PUT  /api/v1/devices/:id/contacts [{ name, phone, priority }]
 GET  /api/v1/alerts?open=true
 POST /api/v1/alerts/:id/ack
 PUT  /api/v1/me/fcm-token
 ```
+
+Todos os pedidos do dispositivo levam `X-SOS-App-Version`. O
+`recordAppVersion` (em `routes/device.ts`) grava-o na coluna `app_version`, e
+só quando muda. Cabeçalho em falta ou com lixo é ignorado em silêncio — a app
+antiga tem de continuar a funcionar.
 
 **WebSocket:** `/ws?token=<jwt>`. Eventos `hello`, `location`, `alert`.
 Ping de 30 em 30 s para atravessar o túnel; o cliente religa com espera
@@ -290,6 +310,15 @@ chega, e só um encerramento forçado recupera. Num telemóvel no bolso de algu�
 que nunca vai forçar o encerramento de nada, isto é falha silenciosa total.
 Usa o SDK da Transistor, que gere o próprio serviço e trata de `startOnBoot` e
 `stopOnTerminate`. Continua a servir para leituras pontuais (o GPS do SOS).
+
+**A deteção de queda não corre em segundo plano.** O `expo-sensors` só entrega
+leituras do acelerómetro com a app à frente; com o ecrã apagado o Android
+suspende a subscrição e ninguém dá por isso. Como o telemóvel de quem anda a
+viver a sua vida está no bolso e bloqueado, isto apanha muito menos do que
+parece. Fazê-la a sério exige um listener nativo dentro do foreground service
+(config plugin), não JavaScript. O que lá está é honesto e testado
+(`app/src/lib/fallDetection.ts`), mas não prometas à família que o telemóvel
+deteta quedas sozinho — o botão SOS é que é a garantia.
 
 **Licença da Transistor.** Exigida em builds de release; builds de debug
 funcionam sem ela. Para uso familiar, um debug build com o bundle JS embutido é
@@ -377,6 +406,19 @@ Não é só ética. Em Portugal o RGPD aplica-se mesmo entre familiares, e uma a
 oculta a ler comunicações de um adulto capaz é juridicamente problemática. Se
 houver incapacidade declarada, deve existir representante legal.
 
+**Microfone: sim, mas nunca em segredo.** O caso de uso é legítimo — a pessoa
+caiu, não chegou ao telemóvel, e alguém tem de perceber se está a pedir ajuda.
+A resposta do projeto (`ROADMAP.md` §1.7) é o telemóvel *atender uma chamada*
+de um contacto de emergência em alta voz, depois de anunciar em voz alta e no
+ecrã que o vai fazer, com um botão para recusar e registo no "O que é
+partilhado". O áudio vai pela rede de voz e nunca toca no servidor: não há
+gravações no Pi para alguém perder. Escuta remota silenciosa é outra coisa, e
+está fora de âmbito — gravar alguém sem consentimento é crime em Portugal
+(art.º 199.º do Código Penal), e uma app que escuta às escondidas morre no dia
+em que for descoberta. **Câmara está fora de âmbito** por não servir para
+nada: um telemóvel que a pessoa não alcançou está no bolso ou virado ao
+contrário.
+
 **Leitura de SMS está fora do âmbito, por decisão.** `READ_SMS` é a permissão
 mais sensível do Android, tem pouco valor prático para segurança (localização e
 SOS dão muito mais) e transformaria o projeto num produto diferente. O caso de
@@ -418,6 +460,25 @@ vale o `compose.yaml` sozinho, onde a porta é a 3000.
 do Docker Desktop, por isso o servidor corre `dev:poll` (nodemon
 `--legacy-watch`) e o Vite leva `usePolling`. Sem isto o ficheiro chega
 actualizado ao container mas nada recarrega. Em Linux nativo não seria preciso.
+
+### Ligar as notificações push
+
+O servidor já sabe enviar (`server/src/push.ts`); falta-lhe só a credencial.
+Enquanto `FCM_SERVICE_ACCOUNT` estiver vazio escreve uma linha no arranque e
+não faz mais nada — nenhum alerta se perde por causa disso, só não toca em
+telemóvel nenhum.
+
+1. Firebase Console → projeto novo → Definições → Contas de serviço →
+   **Gerar nova chave privada** → guarda o JSON em
+   `server/data/fcm-service-account.json` (o `data/` já está no `.gitignore`)
+2. No `server/.env`: `FCM_SERVICE_ACCOUNT=data/fcm-service-account.json`
+3. Reinicia o servidor. Um alerta novo passa a ir para todos os cuidadores
+   com `fcm_token` gravado
+
+**Falta a outra metade:** o painel ainda não pede permissão de notificações
+nem regista o token — o `PUT /api/v1/me/fcm-token` existe, mas ninguém lhe
+chama. Isso precisa da config web do Firebase (`apiKey`, `messagingSenderId`,
+chave VAPID) e de um service worker no `dashboard/public/`.
 
 Criar o primeiro cuidador (o registo fecha a seguir):
 
@@ -497,6 +558,32 @@ importa-se; até lá, o estado real é o que está aqui em baixo.
   (`server/src/alerts.ts`), heartbeat, contactos, registo/login, gestão de
   dispositivos, alertas abertos + confirmação, token FCM
 - `server/src/broadcast.ts` — o ponto onde as rotas chamam `broadcast()`
+- Deteção de queda (`app/src/lib/fallDetection.ts` + ecrã "Caiu?" no
+  `HomeScreen`): queda livre seguida de impacto dentro de 1,5 s, 30 s para
+  dizer "Estou bem", alerta `fall` se ninguém responder. A parte que decide
+  é pura e tem 6 testes; os limiares são o botão de afinação e ainda não
+  foram medidos num telemóvel. Ver a armadilha do primeiro plano na §9
+- `server/src/push.ts` — envio FCM pela HTTP v1, à mão com o `jsonwebtoken`
+  que já cá estava (sem `firebase-admin`): JWT RS256 → access token → envio,
+  em fire-and-forget a partir de `createAlert()`. Apaga o `fcm_token` só num
+  404. **Desligado enquanto não houver credencial**, e falta a metade do
+  painel que regista o token — ver §12
+- Revogação de sessões de cuidador: `token_version` no JWT e na BD, botão
+  "Sair em todo o lado" no painel. Tokens antigos (sem `tv`) continuam a valer
+  como versão 1, por isso o deploy não expulsa ninguém
+- Versão da app por dispositivo: coluna `app_version` (migrada com
+  `addColumn`, verificada numa BD que já existia), cabeçalho
+  `X-SOS-App-Version` na app, e a versão à vista no painel — é o que permite
+  ver quem apanhou uma OTA e quem ficou para trás (§9)
+- `server/src/contacts.ts` + cartão "Quem ligar" no painel: o cuidador edita
+  os contactos e o telemóvel apanha-os no heartbeat seguinte (até 15 min).
+  Fecha o único caminho que obrigava a pegar no telemóvel do idoso para mudar
+  para quem o SOS liga
+- Travão de força bruta em `auth.ts` (`tooManyFailures`/`recordFailure`/
+  `forgetFailures`), aplicado ao `/auth/login` e ao `/device/pair` — os dois
+  únicos segredos adivinháveis do sistema. Conta só falhas, janela de 15 min,
+  chave = o que está a ser atacado (a conta, o emparelhamento), nunca o IP:
+  atrás do túnel todos os pedidos vêm do mesmo endereço local
 - `server/src/ws.ts` — `/ws?token=<jwt>`, evento `hello`, ping de 30 s,
   difunde tudo o que passa por `broadcast()`
 - `server/src/watchdog.ts` — verifica a cada minuto, `device_offline` ao fim
@@ -514,12 +601,33 @@ importa-se; até lá, o estado real é o que está aqui em baixo.
   (só o último ponto do lote) — antes só os alertas chamavam `broadcast()`,
   e o pulso do painel precisa deste sinal para respirar em tempo real
 
-**Em curso** — nada ativamente; falta só push FCM para fechar o ciclo de
-alertas do servidor.
+- App do idoso (`app/src/`): emparelhamento por código, pedido de permissões
+  na ordem da §8 (incluindo a isenção de bateria), ecrã de contacto primário,
+  ecrã inicial com SOS (contagem de 3 s, vibração → chamada → GPS → `POST`),
+  contactos e "O que é partilhado". Fila offline persistente com testes
+  (`offlineQueue.test.ts`, 6 testes em `node:test`)
+- `app/src/lib/location.ts` — `startTracking()`: seguimento contínuo pelo SDK
+  da Transistor (foreground service, `startOnBoot`, `stopOnTerminate: false`),
+  `heartbeatInterval` de 15 min que mantém o `last_seen_at` fresco com o
+  telemóvel parado, esvazia as filas quando a rede volta e envia `low_battery`
+  abaixo de 15 %. Chamado no `App.tsx` só depois do onboarding
 
-**Por fazer** — push FCM; multi-cuidador, gestão de contactos e configuração
-da proteção contra fraude no painel; a app inteira para além do andaime do
-Expo; tudo o resto que está no `ROADMAP.md`.
+**Não verificado num telemóvel.** Tudo o que é da app compila e passa no
+`tsc`, mas **nunca correu num Android a sério** — não existe development
+build. O SDK da Transistor e a chamada direta não funcionam no Expo Go
+(`isExpoGo()` protege, mas nesse caso não fazem nada). Antes de acreditar em
+qualquer `[x]` do `ROADMAP.md` §1, faz `npx expo run:android`.
+
+**Em curso** — push FCM: servidor feito, falta a credencial do Firebase e o
+registo do token no painel (§12).
+
+**Por fazer** — as duas frentes maiores são agora **sobreviver a fechar a app**
+(`ROADMAP.md` §1.2) e o **percurso offline ponta a ponta** (§1.6 + §2.7 + §3):
+gravar sem rede, entregar em lote, e o painel saber desenhar o buraco em vez
+de o esconder. Antes de qualquer uma, o teste do *swipe away* num telemóvel —
+é ele que decide o que é mesmo preciso construir. Falta ainda a deteção de
+queda em segundo plano (§9), o watchdog local `AlarmManager`, multi-cuidador e
+a configuração da proteção contra fraude no painel.
 
 ### Fases
 

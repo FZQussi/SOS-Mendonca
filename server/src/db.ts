@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS caregivers (
   password_hash TEXT    NOT NULL,
   name          TEXT    NOT NULL,
   fcm_token     TEXT,
+  -- Sobe de um sempre que se revogam sessões. O JWT leva o valor que tinha
+  -- quando foi assinado; se já não bater, deixa de valer (Context.md §7).
+  token_version INTEGER NOT NULL DEFAULT 1,
   created_at    INTEGER NOT NULL
 );
 
@@ -34,6 +37,9 @@ CREATE TABLE IF NOT EXISTS devices (
   pairing_expires_at INTEGER,
   battery_pct        INTEGER,
   last_seen_at       INTEGER,
+  -- Versão da app que este telemóvel corre. Sem isto não há como saber quem
+  -- ficou para trás numa OTA má (Context.md §9).
+  app_version        TEXT,
   created_at         INTEGER NOT NULL
 );
 
@@ -115,8 +121,10 @@ export function addColumn(db: DB, table: string, column: string, definition: str
 
 function migrate(db: DB): void {
   db.exec(SCHEMA);
-  // Migrações futuras entram aqui, com addColumn(). Exemplo:
-  //   addColumn(db, 'devices', 'app_version', 'TEXT');
+  // A coluna já está no SCHEMA acima, mas isso só serve para bases de dados
+  // novas — a do Pi foi criada antes dela existir (Context.md §6).
+  addColumn(db, 'devices', 'app_version', 'TEXT');
+  addColumn(db, 'caregivers', 'token_version', 'INTEGER NOT NULL DEFAULT 1');
 }
 
 export function openDatabase(file = process.env.DB_PATH ?? 'data/sos.db'): DB {

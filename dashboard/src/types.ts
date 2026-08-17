@@ -5,6 +5,8 @@ export interface Device {
   name: string;
   battery_pct: number | null;
   last_seen_at: number | null;
+  /** Null enquanto o telemóvel nunca tiver falado com uma app que a envie. */
+  app_version: string | null;
   created_at: number;
   paired: boolean;
   pairing_code: string | null;
@@ -19,6 +21,14 @@ export interface LocationPoint {
   accuracy_m: number | null;
   battery_pct: number | null;
   recorded_at: number;
+}
+
+export interface Contact {
+  id: number;
+  name: string;
+  phone: string;
+  /** 1 = quem o SOS liga primeiro. No painel é a ordem das linhas. */
+  priority: number;
 }
 
 export interface Alert {

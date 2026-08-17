@@ -1,5 +1,6 @@
 import { db, now, type AlertType } from './db.js';
 import { broadcast } from './broadcast.js';
+import { notifyCaregivers } from './push.js';
 
 /**
  * Janelas de anti-spam por tipo (Context.md §5, princípio 4: "alertar de mais
@@ -72,5 +73,8 @@ export function createAlert(input: NewAlert): AlertRow | null {
     received_at: receivedAt,
   };
   broadcast({ event: 'alert', data: row });
+  // Fire-and-forget: o push passa pela rede até à Google e o SOS não pode
+  // esperar por isso. `notifyCaregivers` não deixa escapar nenhum erro.
+  void notifyCaregivers(row);
   return row;
 }

@@ -5,6 +5,7 @@ import { clockTime, timeAgo } from './format';
 import { Pulse, type PulseState } from './components/Pulse';
 import { DeviceMap } from './components/DeviceMap';
 import { AlertsPanel } from './components/AlertsPanel';
+import { ContactsCard } from './components/ContactsCard';
 import { PairDevice } from './components/PairDevice';
 import { PairingCode } from './components/PairingCode';
 import { Login } from './components/Login';
@@ -133,6 +134,17 @@ function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
     onLoggedOut();
   }
 
+  /**
+   * Sair fecha só esta janela. Isto fecha todas — é o que se faz quando o
+   * telemóvel com o painel aberto se perde, e a única forma de matar um JWT
+   * antes dos 30 dias.
+   */
+  async function revokeSessions() {
+    if (!window.confirm('Terminar a sessão em todos os dispositivos? Terá de entrar outra vez em cada um.')) return;
+    await api.revokeSessions().catch(() => undefined);
+    logout();
+  }
+
   const current = useMemo(() => devices?.find((d) => d.id === selectedId) ?? null, [devices, selectedId]);
   const currentOpenAlerts = useMemo(
     () => openAlerts.filter((a) => a.device_id === selectedId),
@@ -169,6 +181,9 @@ function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
           <span>{getCaregiverName()}</span>
           <button className="link-button" onClick={logout}>
             Sair
+          </button>
+          <button className="link-button link-button--quiet" onClick={revokeSessions}>
+            Sair em todo o lado
           </button>
         </div>
       </header>
@@ -208,6 +223,8 @@ function Dashboard({ onLoggedOut }: { onLoggedOut: () => void }) {
                 onLoadHistory={loadHistory}
                 onAcked={ackLocally}
               />
+
+              <ContactsCard deviceId={current.id} />
             </div>
           </>
         )}
@@ -249,9 +266,15 @@ function Overview({
       <div>
         <h1 className={`hero__phrase ${state === 'alarme' ? 'hero__phrase--alarme' : ''}`}>{phrase}</h1>
         <p className="hero__meta">
-          {device.battery_pct != null && <>Bateria {device.battery_pct}%</>}
-          {device.battery_pct != null && device.last_seen_at != null && ' · '}
-          {device.last_seen_at != null && <>Último sinal {timeAgo(device.last_seen_at, now)}</>}
+          {[
+            device.battery_pct != null && `Bateria ${device.battery_pct}%`,
+            device.last_seen_at != null && `Último sinal ${timeAgo(device.last_seen_at, now)}`,
+            // Depois de uma OTA, é aqui que se confirma quem já a apanhou
+            // — e quem ficou para trás (Context.md §9).
+            device.app_version != null && `App ${device.app_version}`,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
         </p>
       </div>
     </div>

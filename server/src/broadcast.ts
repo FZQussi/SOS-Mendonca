@@ -1,11 +1,9 @@
 import { EventEmitter } from 'node:events';
 
 /**
- * Ponto de encontro entre as rotas e o WebSocket. Ainda não há WebSocket
- * (é o próximo passo do roadmap) — as rotas já chamam `broadcast()`, como a
- * convenção do Context.md §7 exige, e o servidor WS há de subscrever este
- * emissor quando existir. Até lá, os eventos emitem-se e ninguém ouve, o que
- * é inofensivo.
+ * Ponto de encontro entre as rotas e o WebSocket (`ws.ts` subscreve este
+ * emissor). Convenção do Context.md §7: todo o alerta novo chama `broadcast()`
+ * a seguir ao INSERT. Sem ninguém à escuta, emitir é inofensivo.
  */
 export const events = new EventEmitter();
 

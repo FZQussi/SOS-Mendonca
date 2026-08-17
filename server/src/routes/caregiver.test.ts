@@ -8,7 +8,7 @@ process.env.JWT_SECRET ??= 'segredo-de-teste-não-usar-em-produção';
 
 const { createApp } = await import('../index.js');
 const { db, now } = await import('../db.js');
-const { hashPassword, signCaregiverToken } = await import('../auth.js');
+const { hashPassword, signCaregiverToken, LOGIN_MAX_FAILURES } = await import('../auth.js');
 
 const app = createApp();
 const server: Server = createServer(app);
@@ -96,6 +96,57 @@ test('login: credenciais corretas → token', async () => {
   assert.ok((body as { token: string }).token);
 });
 
+// Os contadores de falhas têm o email como chave, por isso cada teste com o
+// seu email já fica isolado dos outros — não é preciso limpar nada aqui.
+test('login: força bruta bate no 429, sem prender as outras contas', async () => {
+  seedCaregiver('bruta@exemplo.pt');
+  seedCaregiver('outra@exemplo.pt');
+
+  for (let i = 0; i < LOGIN_MAX_FAILURES; i++) {
+    const { status } = await json('/api/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'bruta@exemplo.pt', password: `errada-${i}` }),
+    });
+    assert.equal(status, 401, `tentativa ${i + 1} devia ainda passar pelo travão`);
+  }
+
+  const blocked = await json('/api/v1/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'bruta@exemplo.pt', password: 'correcta123' }),
+  });
+  assert.equal(blocked.status, 429, 'a password certa também é recusada enquanto o travão está ativo');
+
+  const outra = await json('/api/v1/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'outra@exemplo.pt', password: 'correcta123' }),
+  });
+  assert.equal(outra.status, 200, 'travar uma conta não pode travar as restantes');
+});
+
+test('login: um sucesso limpa as falhas anteriores', async () => {
+  seedCaregiver('limpa@exemplo.pt');
+
+  for (let i = 0; i < LOGIN_MAX_FAILURES - 1; i++) {
+    await json('/api/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'limpa@exemplo.pt', password: 'errada' }),
+    });
+  }
+
+  const ok = await json('/api/v1/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'limpa@exemplo.pt', password: 'correcta123' }),
+  });
+  assert.equal(ok.status, 200);
+
+  // Sem a limpeza, esta falha seria a número 10 e o próximo pedido daria 429.
+  const depois = await json('/api/v1/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'limpa@exemplo.pt', password: 'errada' }),
+  });
+  assert.equal(depois.status, 401);
+});
+
 // --- dispositivos, vistos pelo cuidador -------------------------------------------
 
 test('devices: criar e listar, com pairing_code e paired=false antes do emparelhamento', async () => {
@@ -120,6 +171,105 @@ test('devices: criar e listar, com pairing_code e paired=false antes do emparelh
 
 test('devices: rota exige requireCaregiver', async () => {
   const { status } = await json('/api/v1/devices');
+  assert.equal(status, 401);
+});
+
+test('revoke-sessions: derruba todos os tokens da conta, incluindo o que fez o pedido', async () => {
+  const telemovel = seedCaregiver('revoga@exemplo.pt');
+  // Segundo token da *mesma* conta, como um portátil já com sessão aberta.
+  const portatil = (
+    (await json('/api/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email: 'revoga@exemplo.pt', password: 'correcta123' }),
+    })).body as { token: string }
+  ).token;
+
+  assert.equal((await json('/api/v1/devices', auth(portatil))).status, 200, 'antes de revogar, entra');
+
+  const { status } = await json('/api/v1/auth/revoke-sessions', { method: 'POST', ...auth(telemovel) });
+  assert.equal(status, 200);
+
+  assert.equal((await json('/api/v1/devices', auth(portatil))).status, 401, 'a outra sessão tem de cair');
+  assert.equal((await json('/api/v1/devices', auth(telemovel))).status, 401, 'e a que revogou também');
+
+  // Entrar de novo tem de funcionar — isto revoga sessões, não a conta.
+  const relogin = await json('/api/v1/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'revoga@exemplo.pt', password: 'correcta123' }),
+  });
+  assert.equal(relogin.status, 200);
+  const novo = (relogin.body as { token: string }).token;
+  assert.equal((await json('/api/v1/devices', auth(novo))).status, 200);
+});
+
+test('revoke-sessions: revogar uma conta não mexe nas outras', async () => {
+  const alvo = seedCaregiver('alvo@exemplo.pt');
+  const alheio = seedCaregiver('alheio@exemplo.pt');
+
+  await json('/api/v1/auth/revoke-sessions', { method: 'POST', ...auth(alvo) });
+
+  assert.equal((await json('/api/v1/devices', auth(alheio))).status, 200);
+});
+
+test('revoke-sessions: sem sessão não se revogam sessões de ninguém', async () => {
+  const { status } = await json('/api/v1/auth/revoke-sessions', { method: 'POST' });
+  assert.equal(status, 401);
+});
+
+// --- contactos ---------------------------------------------------------------------
+
+test('contactos: o cuidador edita no painel, o telemóvel lê o que ele guardou', async () => {
+  const caregiver = seedCaregiver('contactos@exemplo.pt');
+  const code = '424242';
+  const { lastInsertRowid } = db
+    .prepare(`INSERT INTO devices (name, pairing_code, pairing_expires_at, created_at) VALUES (?,?,?,?)`)
+    .run('Telemóvel da Avó', code, now() + 900_000, now());
+  const deviceId = Number(lastInsertRowid);
+
+  const paired = await json('/api/v1/device/pair', { method: 'POST', body: JSON.stringify({ code }) });
+  assert.equal(paired.status, 200);
+  const deviceToken = (paired.body as { token: string }).token;
+
+  const saved = await json(`/api/v1/devices/${deviceId}/contacts`, {
+    method: 'PUT',
+    ...auth(caregiver),
+    body: JSON.stringify([
+      { name: 'Rita', phone: '910000000', priority: 1 },
+      { name: 'João', phone: '920000000', priority: 2 },
+    ]),
+  });
+  assert.equal(saved.status, 200);
+
+  // É este o ponto da funcionalidade: mudar o número no painel muda para quem
+  // o botão SOS liga, sem ninguém tocar no telemóvel do idoso.
+  const seen = await json('/api/v1/device/contacts', { headers: { Authorization: `Bearer ${deviceToken}` } });
+  assert.equal(seen.status, 200);
+  assert.deepEqual(
+    (seen.body as { contacts: { name: string; phone: string }[] }).contacts.map((c) => c.name),
+    ['Rita', 'João'],
+  );
+});
+
+test('contactos: dispositivo inexistente → 404, sem gravar contactos órfãos', async () => {
+  const caregiver = seedCaregiver('orfaos@exemplo.pt');
+  const { status } = await json('/api/v1/devices/99999/contacts', {
+    method: 'PUT',
+    ...auth(caregiver),
+    body: JSON.stringify([{ name: 'Ninguém', phone: '910000000' }]),
+  });
+  assert.equal(status, 404);
+
+  const { n } = db
+    .prepare(`SELECT COUNT(*) AS n FROM emergency_contacts WHERE device_id = ?`)
+    .get(99999) as { n: number };
+  assert.equal(n, 0);
+});
+
+test('contactos: sem sessão de cuidador não se editam contactos de ninguém', async () => {
+  const { status } = await json('/api/v1/devices/1/contacts', {
+    method: 'PUT',
+    body: JSON.stringify([{ name: 'Intruso', phone: '910000000' }]),
+  });
   assert.equal(status, 401);
 });
 
