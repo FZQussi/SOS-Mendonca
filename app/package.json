@@ -1,0 +1,34 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "expo": "~57.0.13",
+    "expo-application": "~57.0.2",
+    "expo-constants": "~57.0.12",
+    "expo-intent-launcher": "~57.0.1",
+    "expo-location": "~57.0.11",
+    "expo-sensors": "~57.0.2",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.2",
+    "react-native-background-geolocation": "^5.4.0",
+    "react-native-immediate-phone-call": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/react": "~19.2.2",
+    "tsx": "^4.20.6",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "check": "tsc --noEmit",
+    "test": "tsx --test src/lib/offlineQueue.test.ts"
+  },
+  "private": true
+}

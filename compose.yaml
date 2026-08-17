@@ -1,0 +1,27 @@
+# Produção — é isto que corre no Raspberry Pi.
+#   docker compose -f compose.yaml up -d --build
+#
+# O compose.override.yaml é carregado automaticamente em dev, por isso no Pi
+# passa-se o -f explícito para o ignorar.
+#
+# `restart: unless-stopped` faz o que o PM2 fazia: sobrevive a reinícios do Pi.
+
+services:
+  server:
+    build:
+      context: .
+      target: prod
+    ports:
+      - "3000:3000"
+    env_file: server/.env
+    volumes:
+      # A base de dados é um ficheiro no host, não num volume do Docker: o
+      # backup é `cp server/data/sos.db` e sobrevive a um `compose down -v`.
+      - ./server/data:/app/server/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

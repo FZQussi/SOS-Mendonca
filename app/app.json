@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "SOS Mendonça",
+    "slug": "sos-mendonca",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "android": {
+      "package": "pt.mendonca.sos",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "backgroundColor": "#E9EDEF",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "CALL_PHONE",
+        "READ_CONTACTS",
+        "POST_NOTIFICATIONS",
+        "RECEIVE_BOOT_COMPLETED",
+        "WAKE_LOCK",
+        "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+        "VIBRATE",
+        "INTERNET"
+      ]
+    }
+  }
+}

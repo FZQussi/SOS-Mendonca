@@ -1,0 +1,42 @@
+# Desenvolvimento — carregado automaticamente por `docker compose up`.
+# No Pi usa-se `-f compose.yaml` para o ignorar.
+
+services:
+  server:
+    build:
+      target: dev
+    # !override substitui a lista do compose.yaml em vez de lhe acrescentar —
+    # sem isto o Compose tentaria publicar 3000 e 3100 ao mesmo tempo.
+    ports: !override
+      # 3100 no host, não 3000: nesta máquina a 3000 é do printstore_frontend.
+      # No Pi vale o compose.yaml sozinho, onde a 3000 está livre.
+      - "3100:3000"
+    volumes:
+      - ./server:/app/server
+      # Volume anónimo: impede que o bind mount de cima tape as node_modules
+      # instaladas na imagem (que são as compiladas para Linux, não as do Windows).
+      - /app/server/node_modules
+    environment:
+      NODE_ENV: development
+
+  dashboard:
+    build:
+      context: .
+      target: dashboard-deps
+    command: npm run dev -- --host 0.0.0.0
+    working_dir: /app/dashboard
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./dashboard:/app/dashboard
+      - /app/dashboard/node_modules
+    environment:
+      # O proxy do Vite tem de apontar para o nome do serviço, não para
+      # localhost — dentro do container localhost é o próprio container.
+      # A porta é a interna (3000), não a publicada no host.
+      API_URL: http://server:3000
+      # Polling: o HMR não recebe eventos de ficheiro através da partilha do
+      # Docker Desktop. Mesma razão do dev:poll no servidor.
+      POLL: "1"
+    depends_on:
+      - server

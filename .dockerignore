@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+server/public
+server/data
+app/
+.git
+.claude
+skills
+*.md
+.env*
+**/.expo
+*.apk
+*.aab
