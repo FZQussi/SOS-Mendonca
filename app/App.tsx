@@ -8,6 +8,7 @@ import { HomeScreen } from './src/screens/HomeScreen';
 import { ContactsScreen } from './src/screens/ContactsScreen';
 import { WhatIsSharedScreen } from './src/screens/WhatIsSharedScreen';
 import { getContacts, getDeviceToken, isOnboarded, setOnboarded, type StoredContact } from './src/lib/storage';
+import { flushPending, onContactsUpdated, startTracking, syncContacts } from './src/lib/location';
 import { colors } from './src/theme';
 
 type Route = 'carregando' | 'emparelhar' | 'permissoes' | 'contacto' | 'inicio' | 'contactos' | 'partilhado';
@@ -32,12 +33,22 @@ export default function App() {
     }
     setContactsState(await getContacts());
     setRoute('inicio');
+    goLive();
   }
 
   async function afterOnboarding() {
     await setOnboarded();
     setContactsState(await getContacts());
     setRoute('inicio');
+    goLive();
+  }
+
+  /** Só depois das permissões concedidas: seguimento + o que ficou por enviar. */
+  function goLive() {
+    onContactsUpdated(setContactsState);
+    startTracking();
+    void flushPending();
+    void syncContacts();
   }
 
   if (route === 'carregando') {

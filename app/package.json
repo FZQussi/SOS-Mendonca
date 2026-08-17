@@ -28,7 +28,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "check": "tsc --noEmit",
-    "test": "tsx --test src/lib/offlineQueue.test.ts"
+    "test": "tsx --test src/lib/offlineQueue.test.ts src/lib/fallDetection.test.ts"
   },
   "private": true
 }

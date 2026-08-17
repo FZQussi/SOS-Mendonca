@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Accelerometer } from 'expo-sensors';
+import { Animated, StyleSheet, Text, TouchableOpacity, Vibration, View } from 'react-native';
 import { triggerSos } from '../lib/sos';
+import { createFallDetector, magnitude, SAMPLE_INTERVAL_MS } from '../lib/fallDetection';
 import { colors, space, touch, type as t } from '../theme';
 import type { StoredContact } from '../lib/storage';
 
-type Phase = 'normal' | 'contagem' | 'confirmado';
+type Phase = 'normal' | 'contagem' | 'queda' | 'confirmado';
 const COUNTDOWN_MS = 3000;
+/** Uma queda dá muito mais tempo do que o botão: quem carregou quis carregar. */
+const FALL_GRACE_S = 30;
 
 export function HomeScreen({
   contact,
@@ -53,6 +57,42 @@ export function HomeScreen({
 
   useEffect(() => () => clearCountdown(), []);
 
+  // Só se ouve o acelerómetro no ecrã inicial e fora de uma contagem já a
+  // decorrer — a pessoa a carregar no SOS abana o telemóvel, e isso não é uma
+  // queda. Ver o aviso em `fallDetection.ts`: em segundo plano isto não corre.
+  useEffect(() => {
+    if (phase !== 'normal') return;
+
+    const detector = createFallDetector();
+    Accelerometer.setUpdateInterval(SAMPLE_INTERVAL_MS);
+    const subscription = Accelerometer.addListener(({ x, y, z }) => {
+      if (!detector.push(magnitude(x, y, z), Date.now())) return;
+      // Três canais, porque um deles pode estar indisponível (Context.md §10).
+      Vibration.vibrate([0, 400, 200, 400]);
+      setSecondsLeft(FALL_GRACE_S);
+      setPhase('queda');
+    });
+    return () => subscription.remove();
+  }, [phase]);
+
+  // Conta os 30 segundos da queda. Se ninguém disser "estou bem", pede ajuda.
+  useEffect(() => {
+    if (phase !== 'queda') return;
+
+    const tick = setInterval(() => {
+      setSecondsLeft((s) => {
+        if (s <= 1) {
+          clearInterval(tick);
+          void triggerSos(contact?.phone ?? null, 'fall');
+          setPhase('confirmado');
+          return 0;
+        }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [phase, contact]);
+
   if (phase === 'confirmado') {
     return (
       <View style={[styles.container, styles.center]}>
@@ -62,6 +102,29 @@ export function HomeScreen({
         </Text>
         <TouchableOpacity style={styles.secondaryButton} onPress={() => setPhase('normal')}>
           <Text style={styles.secondaryButtonText}>Voltar ao início</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  if (phase === 'queda') {
+    return (
+      <View style={[styles.container, styles.center]}>
+        <Text style={styles.fallTitle}>Caiu?</Text>
+        <Text style={styles.fallBody}>
+          Se não responder, vamos pedir ajuda dentro de {secondsLeft} segundos.
+        </Text>
+        <TouchableOpacity style={styles.fallOkButton} onPress={() => setPhase('normal')}>
+          <Text style={styles.fallOkButtonText}>Estou bem</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.fallHelpButton}
+          onPress={() => {
+            void triggerSos(contact?.phone ?? null, 'fall');
+            setPhase('confirmado');
+          }}
+        >
+          <Text style={styles.fallHelpButtonText}>Preciso de ajuda agora</Text>
         </TouchableOpacity>
       </View>
     );
@@ -149,6 +212,30 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.lg,
   },
   cancelButtonText: { fontSize: t.botao, color: colors.tinta, fontWeight: '700' },
+  fallTitle: { fontSize: t.titulo * 1.3, fontWeight: '800', color: colors.tinta, textAlign: 'center' },
+  fallBody: {
+    fontSize: t.base,
+    color: colors.tinta,
+    textAlign: 'center',
+    marginTop: space.md,
+    paddingHorizontal: space.lg,
+  },
+  // "Estou bem" é a resposta esperada e leva o peso visual todo: quem está
+  // bem tem de conseguir dizê-lo sem procurar (uma ação por ecrã, §10).
+  fallOkButton: {
+    marginTop: space.xl,
+    minHeight: touch.sos * 0.7,
+    minWidth: 260,
+    borderRadius: 20,
+    backgroundColor: colors.musgo,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: space.lg,
+    elevation: 4,
+  },
+  fallOkButtonText: { fontSize: t.botao, color: colors.louca, fontWeight: '800' },
+  fallHelpButton: { marginTop: space.lg, minHeight: touch.minimo, justifyContent: 'center' },
+  fallHelpButtonText: { fontSize: t.base, color: colors.alarme, fontWeight: '700' },
   confirmTitle: { fontSize: t.titulo, fontWeight: '700', color: colors.musgo, textAlign: 'center' },
   confirmBody: { fontSize: t.base, color: colors.tintaSuave, marginTop: space.md, textAlign: 'center' },
   secondaryButton: { marginTop: space.xl, minHeight: touch.minimo, justifyContent: 'center' },

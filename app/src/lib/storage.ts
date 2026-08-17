@@ -12,10 +12,10 @@ export interface StoredContact {
 }
 
 /**
- * Cópia local dos contactos. O servidor só tem `PUT /device/contacts` (o
- * dispositivo envia), não um `GET` de volta — se o cuidador os vier a editar
- * no painel, esta app não saberá ainda (falta no ROADMAP.md §2.3/§3). Até lá,
- * a app é a origem da verdade dos seus próprios contactos.
+ * Cópia local dos contactos. A origem da verdade é o servidor — o cuidador
+ * edita-os no painel e a app puxa-os com `syncContacts()`. Esta cópia existe
+ * porque no momento do SOS não pode haver um `await` de rede antes da chamada
+ * (princípio 2): liga-se ao que está guardado, mesmo sem rede nenhuma.
  */
 export async function getContacts(): Promise<StoredContact[]> {
   const raw = await AsyncStorage.getItem(CONTACTS_KEY);

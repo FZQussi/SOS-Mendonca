@@ -1,4 +1,13 @@
+import Constants from 'expo-constants';
 import { getDeviceToken } from './storage';
+
+/**
+ * Vai em todos os pedidos (Context.md §9) para o painel poder mostrar que
+ * versão cada telemóvel corre. Lê-se do `app.json`, que viaja no bundle JS —
+ * portanto muda com cada OTA, que é exatamente o que interessa saber quando
+ * uma OTA parte alguma coisa num telemóvel e noutro não.
+ */
+const APP_VERSION = Constants.expoConfig?.version ?? 'desconhecida';
 
 /**
  * No Pi, isto é o domínio do túnel Cloudflare (https://...). Em desenvolvimento,
@@ -21,6 +30,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...init,
     headers: {
       'Content-Type': 'application/json',
+      'X-SOS-App-Version': APP_VERSION,
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...init.headers,
     },
@@ -56,7 +66,9 @@ export const deviceApi = {
   sendLocations: (points: LocationPoint | LocationPoint[]) =>
     request<{ saved: number }>('/device/locations', { method: 'POST', body: JSON.stringify(points) }),
 
-  sendAlert: (type: AlertType, extra?: { lat?: number; lon?: number; note?: string }) =>
+  // `recorded_at` importa quando o alerta sai da fila offline horas depois: o
+  // cuidador quer a hora em que aconteceu, não a de chegada (Context.md §6).
+  sendAlert: (type: AlertType, extra?: { lat?: number; lon?: number; note?: string; recorded_at?: number }) =>
     request<{ id: number } | { suppressed: true }>('/device/alerts', {
       method: 'POST',
       body: JSON.stringify({ type, ...extra }),
@@ -64,6 +76,8 @@ export const deviceApi = {
 
   heartbeat: (batteryPct: number) =>
     request<{ ok: true }>('/device/heartbeat', { method: 'POST', body: JSON.stringify({ battery_pct: batteryPct }) }),
+
+  getContacts: () => request<{ contacts: EmergencyContact[] }>('/device/contacts'),
 
   setContacts: (contacts: EmergencyContact[]) =>
     request<{ contacts: EmergencyContact[] }>('/device/contacts', { method: 'PUT', body: JSON.stringify(contacts) }),
